@@ -21,9 +21,13 @@ namespace Switcheroo;
 /// </summary>
 public partial class MainWindow : Window
 {
+
+    private const int MAX_WIDTH = 1200;
     // MODIFIED: List to hold selected windows and index for cycling
     private List<HWND> _selectedWindows = new List<HWND>();
     private int _selectedWindowIndex = -1;
+    private Border? _lastCycledContainer = null;
+
 
     public MainWindow()
     {
@@ -68,24 +72,96 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Revert previous cycled container (if any)
+        if (_lastCycledContainer != null)
+        {
+            // Determine the stored HWND for that container
+            if (_lastCycledContainer.Tag is HWND prevHwnd)
+            {
+                // If the window is still selected, restore the selected color; otherwise default gray
+                _lastCycledContainer.BorderBrush = _selectedWindows.Contains(prevHwnd)
+                    ? Brushes.LimeGreen
+                    : Brushes.Gray;
+            }
+            else
+            {
+                _lastCycledContainer.BorderBrush = Brushes.Gray;
+            }
+
+            _lastCycledContainer = null;
+        }
+
         // Increment and wrap the index
         _selectedWindowIndex++;
         if (_selectedWindowIndex >= _selectedWindows.Count)
         {
             _selectedWindowIndex = 0;
-        }
+        };
+
 
         // Get the window handle to activate
         HWND hwndToActivate = _selectedWindows[_selectedWindowIndex];
 
-        // Activate the target window
+        // If the window is minimized, restore it
+        if (User32.IsIconic(hwndToActivate))
+        {
+            User32.ShowWindow(hwndToActivate, ShowWindowCommand.SW_RESTORE);
+        }
+
         User32.SetForegroundWindow(hwndToActivate);
 
         this.Activate();
 
-        //// Minimize this app so you can see the window
-        //this.WindowState = WindowState.Minimized;
+
+        foreach (var child in WindowPanel.Children.OfType<Border>())
+        {
+            if (child.Tag is HWND h && h == hwndToActivate)
+            {
+                child.BorderBrush = Brushes.DodgerBlue; // cycled-to color
+                _lastCycledContainer = child;
+                break;
+            }
+        }
     }
+
+    private int Countwindows()
+    {
+        int windowCount = 0;
+        User32.EnumWindows((hwnd, _) =>
+        {
+            if (User32.IsWindowVisible(hwnd) &&
+                User32.GetWindowTextLength(hwnd) > 0)
+            {
+
+                IntPtr exStylePtr = User32.GetWindowLongPtr(hwnd, User32.WindowLongFlags.GWL_EXSTYLE);
+                long exStyle = exStylePtr.ToInt64();
+
+                var toolWindowStyle = (long)User32.WindowStylesEx.WS_EX_TOOLWINDOW;
+
+                if ((exStyle & toolWindowStyle) == toolWindowStyle)
+                {
+                    
+                    return true; // Continue enumeration
+                }
+                if (isCloaked(hwnd))
+                {
+                    return true; // Continue enumeration
+                }
+                windowCount++;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return windowCount;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
+    private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    // Constants for GetWindowLongPtr
+    private const int GWL_EXSTYLE = -20;
+
+    // Extended Window Styles
+    private const long WS_EX_TOOLWINDOW = 0x00000080L;
 
     private void LoadWindows()
     {
@@ -94,30 +170,41 @@ public partial class MainWindow : Window
         _selectedWindows.Clear();
         _selectedWindowIndex = -1;
 
+        int windowCount = Countwindows();
+        if (windowCount == 0) return;
+
+
         User32.EnumWindows((hwnd, _) =>
         {
             if (User32.IsWindowVisible(hwnd) &&
                 User32.GetWindowTextLength(hwnd) > 0)
             {
+
+                IntPtr exStylePtr = User32.GetWindowLongPtr(hwnd, User32.WindowLongFlags.GWL_EXSTYLE);
+                long exStyle = exStylePtr.ToInt64();
+
+                var toolWindowStyle = (long)User32.WindowStylesEx.WS_EX_TOOLWINDOW;
+
+                // If the window has the 'Tool Window' style, it's not a
+                // main application window, so skip it.
+                if ((exStyle & toolWindowStyle) == toolWindowStyle)
+                {
+                    return true; // Continue enumeration
+                }
+                // *** END OF NEW CHECK ***
                 int length = User32.GetWindowTextLength(hwnd);
                 var sb = new System.Text.StringBuilder(length + 1);
                 User32.GetWindowText(hwnd, sb, sb.Capacity);
                 string title = sb.ToString();
 
-                AddThumbnail(hwnd, title);
+                AddThumbnail(hwnd, title, windowCount);
             }
             return true;
         }, IntPtr.Zero);
     }
 
-    // private Border _selectedThumbnail = null; // MODIFIED: Removed unused variable
-
-    private void AddThumbnail(Vanara.PInvoke.HWND hwnd, string title)
+    private bool isCloaked(Vanara.PInvoke.HWND hwnd)
     {
-        // Skip minimized windows
-        if (User32.IsIconic(hwnd))
-            return;
-
         // Allocate space for a DWORD
         uint cloaked = 0;
         IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf(cloaked));
@@ -135,28 +222,43 @@ public partial class MainWindow : Window
             if (cloaked != 0)
             {
                 Marshal.FreeHGlobal(ptr);
-                return; // Skip cloaked window
+                return true; // Skip cloaked window
             }
         }
 
         Marshal.FreeHGlobal(ptr);
 
+        return false;
+    }
+
+
+    // private Border _selectedThumbnail = null; // MODIFIED: Removed unused variable
+
+    private void AddThumbnail(Vanara.PInvoke.HWND hwnd, string title, int windowCount)
+    {
+        //// Skip minimized windows
+        //if (User32.IsIconic(hwnd))
+        //    return;
+
+        if (isCloaked(hwnd))
+            return;
+
+        int maxWindowWidth = (MAX_WIDTH / windowCount) - 40;
+
         // Create container for thumbnail
         var container = new Border
         {
-            Width = 300,
+            Width = maxWindowWidth,
             Height = 200,
             Margin = new Thickness(10),
             BorderBrush = System.Windows.Media.Brushes.Gray, // Default border
             BorderThickness = new Thickness(10),
             Background = System.Windows.Media.Brushes.Black,
-            Cursor = System.Windows.Input.Cursors.Hand
+            Cursor = System.Windows.Input.Cursors.Hand,
+            Tag = hwnd
         };
 
-        // MODIFIED: Store the HWND in the Tag property for easy access
-        container.Tag = hwnd;
 
-        // MODIFIED: Attach the click handler
         container.MouseLeftButtonUp += Thumbnail_MouseLeftButtonUp;
 
         var grid = new Grid();
@@ -174,18 +276,6 @@ public partial class MainWindow : Window
         };
 
         grid.Children.Add(overlayText);
-
-        var subtitleText = new TextBlock
-        {
-            Text = "Subtitle goes here",
-            Foreground = Brushes.LightGray,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(5),
-            FontStyle = FontStyles.Italic
-        };
-
-        grid.Children.Add(subtitleText);
 
 
         container.Loaded += (_, __) =>
@@ -222,14 +312,11 @@ public partial class MainWindow : Window
                 };
 
                 DwmApi.DwmUpdateThumbnailProperties(thumb, props);
-
-                // MODIFIED: Removed the original click handler from here
-                // as we added a more advanced one above.
             }
         };
     }
 
-    // MODIFIED: New method to handle thumbnail clicks
+
     private void Thumbnail_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         var container = sender as Border;
@@ -249,7 +336,8 @@ public partial class MainWindow : Window
         {
             // Not selected, so SELECT it
             _selectedWindows.Add(hwnd);
-            container.BorderBrush = Brushes.LimeGreen; // Set border to bright green
+            container.BorderBrush = Brushes.Lime; // Set border to bright green
+            
         }
     }
 }
